@@ -1,1 +1,110 @@
+/**
+ * VODA EQUIPMENT TRACKER — GOOGLE SHEETS BACKEND
+ * ------------------------------------------------
+ * This turns a Google Sheet into the live database for the equipment
+ * tracker app, so everyone on the team sees the same real-time data
+ * from their own phone — no Claude account needed on their end.
+ *
+ * SETUP (one-time):
+ * 1. Create a new Google Sheet (sheets.new)
+ * 2. Extensions > Apps Script
+ * 3. Delete anything in the editor, paste in this entire file
+ * 4. Click Deploy > New deployment
+ *    - Type: Web app
+ *    - Execute as: Me
+ *    - Who has access: Anyone
+ * 5. Click Deploy, authorize when prompted
+ * 6. Copy the "Web app URL" it gives you — that's your API_URL
+ *
+ * If you're UPDATING an existing backend (not setting up fresh), just
+ * paste this over your old Apps Script code and save — no redeploy
+ * needed, the Web app URL stays the same.
+ *
+ * Four tabs are created automatically the first time the app saves
+ * data: Inventory, Activity, Personnel, and ClientInfo (holds an
+ * optional address per client/job-site name, used for reports).
+ */
 
+var INVENTORY_COLS = ['id','type','model','serial','purchaseDate','status','jobsite','tech','checkedOutDate','expectedReturnDate','condition','lastMaintenanceDate','notes','barcode'];
+var ACTIVITY_COLS  = ['ts','action','id','type','jobsite','tech','extra'];
+var PERSONNEL_COLS = ['name'];
+var CLIENT_COLS    = ['name','address'];
+
+function doGet(e) {
+  var action = (e.parameter.action || 'getAll');
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (action === 'getAll') {
+    return jsonResponse({
+      inventory: sheetToObjects(ss, 'Inventory', INVENTORY_COLS),
+      activity: sheetToObjects(ss, 'Activity', ACTIVITY_COLS),
+      personnel: sheetToObjects(ss, 'Personnel', PERSONNEL_COLS).map(function(r){ return r.name; }),
+      clients: sheetToObjects(ss, 'ClientInfo', CLIENT_COLS)
+    });
+  }
+  return jsonResponse({ error: 'unknown action' });
+}
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    var body = JSON.parse(e.postData.contents);
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (body.action === 'saveInventory') {
+      objectsToSheet(ss, 'Inventory', body.data, INVENTORY_COLS);
+    } else if (body.action === 'saveActivity') {
+      objectsToSheet(ss, 'Activity', body.data, ACTIVITY_COLS);
+    } else if (body.action === 'savePersonnel') {
+      var rows = (body.data || []).map(function(n){ return { name: n }; });
+      objectsToSheet(ss, 'Personnel', rows, PERSONNEL_COLS);
+    } else if (body.action === 'saveClientInfo') {
+      objectsToSheet(ss, 'ClientInfo', body.data, CLIENT_COLS);
+    } else {
+      return jsonResponse({ error: 'unknown action' });
+    }
+    return jsonResponse({ ok: true });
+  } catch (err) {
+    return jsonResponse({ error: String(err) });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function sheetToObjects(ss, name, cols) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  var lastCol = Math.max(sheet.getLastColumn(), cols.length);
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), lastCol).getValues();
+  var headers = values[0];
+  var rows = values.slice(1);
+  return rows
+    .filter(function(r){ return r.join('') !== ''; })
+    .map(function(r){
+      var obj = {};
+      headers.forEach(function(h, i){
+        var v = r[i];
+        if (v instanceof Date) {
+          v = Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+        }
+        obj[h] = (v === null || v === undefined) ? '' : v;
+      });
+      return obj;
+    });
+}
+
+function objectsToSheet(ss, name, data, cols) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, cols.length).setValues([cols]);
+  if (data && data.length) {
+    var rows = data.map(function(obj){
+      return cols.map(function(c){ return obj[c] !== undefined ? obj[c] : ''; });
+    });
+    sheet.getRange(2, 1, rows.length, cols.length).setValues(rows);
+  }
+}
+
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
